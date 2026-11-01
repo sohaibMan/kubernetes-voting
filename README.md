@@ -55,6 +55,26 @@ What each resource does:
 - **Liveness probe:** checks the app itself; a Redis outage does not force app restarts.
 - **PersistentVolumeClaim:** keeps Redis data when its pod is replaced. Redis uses AOF persistence; abrupt failure can lose recent writes before a disk flush.
 
+## Local hostname: voting.app.local
+
+Add a local hosts entry on your Mac (once):
+
+```sh
+if ! dscacheutil -q host -a name voting.app.local | grep -q '127.0.0.1'; then
+  printf '\n127.0.0.1 voting.app.local\n' | sudo tee -a /etc/hosts
+fi
+sudo dscacheutil -flushcache
+sudo killall -HUP mDNSResponder
+```
+
+Forward the Kubernetes Service in a terminal and leave it running:
+
+```sh
+kubectl --context docker-desktop -n voting port-forward service/voting-app 8081:80
+```
+
+Open http://voting.app.local:8081. The hosts entry maps the name to this Mac; it does not forward ports or expose the app to other devices. For the Python app running directly on port 8080, use http://voting.app.local:8080 instead. `.local` is reserved for multicast DNS; the explicit hosts entry is used here for the requested local name.
+
 ## 4. Try scaling
 
 In another terminal:
@@ -108,3 +128,17 @@ kubectl --context docker-desktop delete namespace voting
 ```
 
 This is a local learning environment. Redis is a single instance, there is no TLS or authentication, and polling replaces WebSockets for simplicity. Keep it local. Next exercises: ingress, autoscaling, metrics, and network policies.
+
+## Deploy to AWS with CDK
+
+See [the AWS walkthrough](cdk/README.md) for the TypeScript CDK stack, AWS authentication, EKS costs, deployment, and cleanup. From this project root, after configuring credentials and bootstrapping CDK:
+
+```sh
+export AWS_REGION=eu-west-3
+export ADMIN_PRINCIPAL_ARN='arn:aws:iam::123456789012:role/YourRole'
+./scripts/deploy-aws.sh
+```
+
+## Stress test the deployment
+
+Run `./scripts/stress-test.sh podpoll` for AWS or `./scripts/stress-test.sh docker-desktop` locally. This launches a three-minute in-cluster k6 test up to 50 concurrent users and adds real votes. See [the load testing guide](load-test/README.md) for thresholds, monitoring, increasing load, and pod recovery experiments.

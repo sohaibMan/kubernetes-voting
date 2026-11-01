@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 .env
 .DS_Store
+
+node_modules/
+cdk/dist/
+cdk/cdk.out/
+cdk/cdk.context.json

@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: voting-load-
+  namespace: voting
+  labels:
+    app: voting-load
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: voting-load
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: k6
+          image: grafana/k6:0.57.0
+          args: ["run", "/tests/voting.js"]
+          env:
+            - name: PEAK_VUS
+              value: "50"
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: tests
+              mountPath: /tests
+              readOnly: true
+      volumes:
+        - name: tests
+          configMap:
+            name: voting-load-script
