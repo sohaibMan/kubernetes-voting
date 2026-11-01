@@ -9,6 +9,7 @@ This CDK application is independent of the other infrastructure projects in the 
 3. One on-demand `t3.medium` Amazon Linux 2023 worker (scaling range 1–2).
 4. An ECR repository for Docker images.
 5. The EKS Pod Identity agent and EBS CSI storage driver, with its own IAM role.
+6. Metrics Server, providing CPU metrics for the optional HPA scaling test.
 
 The deployment script builds and pushes the image, then applies the Kubernetes manifests: two app pods, Redis, and an encrypted gp3 volume. It builds `linux/amd64` even on Apple Silicon. Local manifests remain unchanged; the AWS overlay selects the EBS StorageClass. No managed Redis service, NAT gateway, or public app load balancer is created.
 
@@ -105,3 +106,21 @@ npm run destroy
 ```
 
 The ECR repository and its images are deleted with the stack. The CDK bootstrap stack and its staging assets remain; they are shared account infrastructure and are not deleted by this command. Check CloudFormation and EBS for leftovers after any failed deletion.
+
+## Bundled minimatch security fix
+
+GHSA-g3hv-75wg-m249 affects minimatch versions below 11.0.1. CDK 2.275.0 still bundles 10.2.6. A normal consumer `overrides` entry does not replace CDK's bundled files, and `npm audit fix --force` cannot produce an upstream CDK release with a patched bundle.
+
+Until AWS publishes a fixed release, run from this directory:
+
+```sh
+npm run security:fix-cdk
+```
+
+This command downloads exactly CDK 2.275.0, replaces its bundled minimatch with exactly 11.0.1, and creates a local CDK tarball in `cdk/vendor/`. It installs that tarball, regenerates the lockfile, verifies the version CDK actually resolves, then runs audit, build and synth. It does not deploy AWS resources. Package lifecycle scripts are disabled during repackaging and installation. The existing CDK runtime code, license, exports and JSII assemblies are preserved; this is a temporary local repack, not an official AWS release. The minimatch major-version change requires the build and synth checks to pass before deployment.
+
+Commit **the tarball, package.json and package-lock.json together** so fresh `npm ci` installations use the same patched bundle. Do not merely edit a version in the lockfile or delete the nested package. If registry access fails, the fix has not been installed; rerun when networking works. Audit output may still show other independent advisories, which need separate review.
+
+Once an official CDK release bundles a patched minimatch, replace the local tarball dependency with that release, confirm `npm ci`, `npm audit`, build and synth, then remove the workaround and vendor tarball.
+
+Advisory: https://github.com/advisories/GHSA-g3hv-75wg-m249

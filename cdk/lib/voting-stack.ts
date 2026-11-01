@@ -44,6 +44,10 @@ export class VotingStack extends Stack {
       diskSize: 20, scalingConfig: { minSize: 1, desiredSize: 1, maxSize: 2 },
     });
     nodes.node.addDependency(vpc.internetConnectivityEstablished);
+    const metrics = new eks.CfnAddon(this, 'MetricsServer', {
+      clusterName: cluster.ref, addonName: 'metrics-server',
+    });
+    metrics.addDependency(nodes);
     const agent = new eks.CfnAddon(this, 'PodIdentityAgent', {
       clusterName: cluster.ref, addonName: 'eks-pod-identity-agent',
     });

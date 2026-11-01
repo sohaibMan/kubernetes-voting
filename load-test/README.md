@@ -1,65 +1,110 @@
-# Stress testing Podpoll
+# Test automatic pod scaling
 
-Run from the project root after deploying. The k6 Job runs **inside the cluster** against the app Service, so traffic can reach both replicas without a port-forward bottleneck. It creates real votes. It shares the learning worker with the app, so generator CPU and node capacity affect results too.
+This test sends real votes to the Kubernetes Service and verifies that the number of **ready app replicas increases**. It does not change EC2 node counts. The HPA scales from 2 to at most 4 replicas at 50% average CPU utilization, relative to the app's 100m CPU request (about 50m per pod). The target is deliberately low for this learning exercise.
 
-## Start small
+## 1. Make CPU metrics available
+
+Check your cluster first:
 
 ```sh
-./scripts/stress-test.sh podpoll
+kubectl --context docker-desktop top pods -n voting
 ```
 
-For Docker Desktop use `./scripts/stress-test.sh docker-desktop` instead. The three-minute test ramps through 10, 25, and 50 concurrent virtual users, holds 50 for one minute, and ramps down. Each user votes, reads results, then waits one second. Virtual users are not requests per second; observe measured throughput.
-
-Pass criteria: fewer than 1% HTTP failures, more than 99% successful response checks, and p95 latency below one second. These are initial learning targets, not a measured service guarantee. The script returns nonzero if the Job fails. Jobs are not retried, so failed thresholds do not generate another traffic run.
-
-## Watch during the test
-
-In separate terminals:
+For Docker Desktop, if Metrics Server is missing, install the upstream release:
 
 ```sh
-kubectl --context podpoll -n voting get pods -w
-kubectl --context podpoll -n voting logs -f deployment/voting-app --all-pods=true --max-log-requests=10
+kubectl --context docker-desktop apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml
+kubectl --context docker-desktop -n kube-system rollout status deployment/metrics-server
+```
+
+Metrics Server 0.8 requires Kubernetes 1.31 or newer. If its logs report kubelet certificate validation errors on Docker Desktop, this local-only adjustment allows its self-signed kubelet certificates:
+
+```sh
+kubectl --context docker-desktop -n kube-system patch deployment metrics-server --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+Do not apply that TLS adjustment to AWS. Wait a minute for metrics collection, then retry `top pods`.
+
+For AWS, the CDK stack now includes the `metrics-server` EKS add-on. Redeploy the stack to install it, then check:
+
+```sh
 kubectl --context podpoll -n voting top pods
-kubectl --context podpoll top nodes
 ```
 
-`top` requires Metrics Server, which this CDK stack does not install. If unavailable, inspect pod restarts, events, k6 latency/error metrics, and EC2 CPU in CloudWatch. On older kubectl versions without `--all-pods`, use `-l app=voting-app --prefix=true` for the logs command.
+## 2. Run the scaling test
 
-Read the k6 summary: `http_reqs` is throughput, `http_req_failed` is error rate, and `http_req_duration` includes p95 latency. Check for pod restarts, `OOMKilled`, or `Pending` pods:
+From the project root:
 
 ```sh
-kubectl --context podpoll -n voting get events --sort-by=.lastTimestamp
+./scripts/stress-test.sh docker-desktop
 ```
 
-## Increase load and compare
-
-Edit `PEAK_VUS` in `load-test/job.yaml` to 100 and then 200, rerunning the script each time. Run one test at a time. Stop increasing once errors or latency cross the thresholds. Inspect load-generator CPU too: a saturated generator cannot establish app capacity.
-
-Try three app replicas, rerun the same load, and compare results:
+For AWS:
 
 ```sh
-kubectl --context podpoll -n voting scale deployment/voting-app --replicas=3
-kubectl --context podpoll -n voting rollout status deployment/voting-app
 ./scripts/stress-test.sh podpoll
 ```
 
-Extra pods share the same single node; this may not improve throughput if node CPU or Redis is the bottleneck. Neither an HPA nor Cluster Autoscaler is installed. A node group's `maxSize: 2` alone does not automatically add nodes. Reapplying the app manifests restores two replicas.
+Without an argument, the script uses and prints your current Kubernetes context. Run in the foreground to see progress. It checks CPU metrics, enables the HPA, and starts an in-cluster k6 Job. Run only one test at a time: active Jobs share the test ConfigMap.
 
-## Test recovery separately
+Traffic ramps through 10, 50, and 100 concurrent users, holds peak load for three minutes, and ramps down, for six minutes total. Each iteration sends a vote and reads results, then waits 0.1 seconds. The script observes ready replicas while the Job runs and prints the k6 summary at the end. It exits nonzero if the Job fails or no ready-replica increase was observed. Existing votes are changed by the test.
 
-During a fresh run, list the app pods and delete one by name:
+### Vote preferences
+
+Each run randomly favors cats or dogs, giving that side a 65–85% chance per vote. The preference is generated once in k6 `setup()` and shared by all virtual users; the k6 log prints it. Unlike equal-probability voting, large runs should visibly favor one side. The UI always shows real cumulative votes, so existing votes can dilute a new run's preference; they are not cleared automatically.
+
+For a fixed preference, add `CAT_SHARE` to the container environment in `load-test/job.yaml`. For example, `value: "0.8"` means each vote has an 80% chance of choosing cats. `"0.2"` favors dogs, `"0.5"` restores equal odds, and `"0"`/`"1"` choose only one side. Omitting the setting restores randomized preferences per run. Start a new test Job after changes; a running Job keeps its original script and preference.
+
+## 3. Watch the scaling
+
+In another terminal (replace the context with `podpoll` for AWS):
 
 ```sh
-kubectl --context podpoll -n voting get pods -l app=voting-app
-kubectl --context podpoll -n voting delete pod <pod-name>
+kubectl --context docker-desktop -n voting get hpa voting-app -w
 ```
 
-Watch the replacement and k6 errors. In-flight requests can fail, so the normal latency/error targets may fail during this experiment. Keep Redis running so this specifically tests app pod recovery.
-
-The runner prints the command to cancel its Job. Finished Jobs expire after one hour. To remove all load-test Jobs immediately:
+In a third terminal:
 
 ```sh
-kubectl --context podpoll -n voting delete jobs -l app=voting-load
+kubectl --context docker-desktop -n voting get pods -w
 ```
 
-Reference: https://grafana.com/docs/k6/latest/using-k6/thresholds/
+Expected sequence: CPU rises above the target, HPA increases desired replicas, new pods become ready, and traffic spreads across them. After traffic stops, the HPA should eventually return to two replicas. Scale-down has a 90-second stabilization window, with at most one pod removed per 30 seconds. Timing also depends on metrics collection and readiness.
+
+Watch CPU snapshots with `kubectl --context docker-desktop -n voting top pods`. The HPA remains enabled after the test. Reapplying `k8s/app.yaml` can briefly reset the Deployment to two replicas; the HPA will reconcile it again.
+
+## 4. Interpret the result
+
+Scaling and service performance are separate results. The k6 targets are fewer than 1% HTTP errors, more than 99% valid response checks, and p95 latency below one second. Scaling can work while these performance targets fail. Conversely, low CPU might mean the app serves this workload without needing more replicas.
+
+If scaling does not happen:
+
+- HPA shows `<unknown>`: fix Metrics Server or wait for fresh samples.
+- CPU stays below 50%: inspect CPU first, then increase `PEAK_VUS` in `load-test/job.yaml` (for example to 200) and rerun.
+- Desired replicas increase but pods stay `Pending`: inspect pod events and node capacity. More load cannot solve scheduling failures.
+- More ready replicas appear but errors remain: Redis, app handling, or node CPU may be the bottleneck.
+
+Useful diagnostics:
+
+```sh
+kubectl --context docker-desktop -n voting describe hpa voting-app
+kubectl --context docker-desktop -n voting get events --sort-by=.lastTimestamp
+kubectl --context docker-desktop -n voting get jobs -l app=voting-load
+```
+
+The load generator shares the learning node and has a 500m CPU limit, so it can become a bottleneck. This experiment does not establish maximum production throughput. The single EKS worker also limits total capacity: HPA adds pods, but no Cluster Autoscaler or Karpenter is installed to add EC2 nodes.
+
+## Cleanup
+
+The runner prints a command to cancel its Job. To stop all test traffic and disable autoscaling:
+
+```sh
+kubectl --context docker-desktop -n voting delete jobs -l app=voting-load
+kubectl --context docker-desktop -n voting delete hpa voting-app
+kubectl --context docker-desktop -n voting scale deployment/voting-app --replicas=2
+kubectl --context docker-desktop -n voting delete configmap voting-load-script
+```
+
+Use `podpoll` for AWS. Finished Jobs expire after an hour; HPA does not expire automatically.
+
+References: [Kubernetes HPA](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/), [Metrics Server](https://kubernetes-sigs.github.io/metrics-server/), [EKS Metrics Server](https://docs.aws.amazon.com/eks/latest/userguide/metrics-server.html).

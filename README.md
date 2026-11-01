@@ -139,6 +139,12 @@ export ADMIN_PRINCIPAL_ARN='arn:aws:iam::123456789012:role/YourRole'
 ./scripts/deploy-aws.sh
 ```
 
-## Stress test the deployment
+## Test automatic scaling
 
-Run `./scripts/stress-test.sh podpoll` for AWS or `./scripts/stress-test.sh docker-desktop` locally. This launches a three-minute in-cluster k6 test up to 50 concurrent users and adds real votes. See [the load testing guide](load-test/README.md) for thresholds, monitoring, increasing load, and pod recovery experiments.
+The stress test enables a CPU-based Horizontal Pod Autoscaler (2–4 app replicas), runs a six-minute in-cluster voting workload, and checks whether more app replicas become ready:
+
+```sh
+./scripts/stress-test.sh docker-desktop
+```
+
+Use `podpoll` instead of `docker-desktop` for AWS. Metrics Server must be available first. See [the scaling test guide](load-test/README.md) for setup, monitoring, tuning, and cleanup.
